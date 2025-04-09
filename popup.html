@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="UTF-8">
+  <title>엑셀 데이터 취합</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      width: 600px;
+      /* 팝업 너비 조정 */
+      padding: 10px;
+    }
+
+    #fileInput {
+      margin-bottom: 10px;
+    }
+
+    #processButton {
+      margin-bottom: 15px;
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin-top: 15px;
+    }
+
+    th,
+    td {
+      border: 1px solid #ddd;
+      padding: 10px 15px;
+      /* 좌우 패딩 추가 확보 */
+      text-align: left;
+      vertical-align: middle;
+    }
+
+    th {
+      background-color: #f2f2f2;
+    }
+
+    #summaryTable th,
+    #summaryTable td {
+      text-align: right;
+    }
+
+    #summaryTable th:first-child,
+    #summaryTable td:first-child {
+      text-align: left;
+    }
+
+    #aggregatedTable th,
+    #aggregatedTable td {
+      text-align: right;
+      /* 기본 오른쪽 정렬 */
+    }
+
+    /* 특정 열 왼쪽 정렬 */
+    #aggregatedTable th:nth-child(1),
+    #aggregatedTable td:nth-child(1),
+    /* 작가명 */
+    #aggregatedTable th:nth-child(2),
+    #aggregatedTable td:nth-child(2),
+    /* 작품명 */
+    #aggregatedTable th:nth-child(3),
+    #aggregatedTable td:nth-child(3) {
+      /* 출판사 */
+      text-align: left;
+    }
+
+    #aggregatedTable th:nth-child(4),
+    #aggregatedTable td:nth-child(4) {
+      /* 판매월 */
+      text-align: center;
+    }
+
+    .hidden {
+      display: none;
+    }
+
+    #loadingIndicator {
+      margin-top: 10px;
+      font-style: italic;
+    }
+  </style>
+</head>
+
+<body>
+  <h3>엑셀 파일 또는 폴더 업로드</h3>
+  <label for="inputYear">연도:</label>
+  <input type="number" id="inputYear" value="2025" min="2000" max="2100">
+  <label for="inputMonth">월:</label>
+  <input type="number" id="inputMonth" value="04" min="1" max="12">
+  <input type="file" id="fileInput" multiple accept=".xlsx, .xls">
+
+  <div id="loadingIndicator" class="hidden">처리 중...</div>
+
+  <div id="results">
+    <h4>요약 데이터</h4>
+    <table id="summaryTable">
+      <thead>
+        <tr>
+          <th>출판사</th>
+          <th>건수</th>
+          <th>총매출</th>
+          <th>순매출</th>
+          <th>정산액</th>
+        </tr>
+      </thead>
+      <tbody>
+        <!-- 요약 데이터가 여기에 삽입됩니다 -->
+      </tbody>
+      <tfoot>
+        <!-- 합계 행이 여기에 삽입됩니다 -->
+      </tfoot>
+    </table>
+
+    <h4>취합 데이터</h4>
+    <table id="aggregatedTable">
+      <thead>
+        <tr>
+          <th>정산월</th>
+          <th>작가명</th>
+          <th>작품명</th>
+          <th>출판사</th>
+          <th>판매월</th>
+          <th>총매출</th>
+          <th>순매출</th>
+          <th>정산액</th>
+        </tr>
+      </thead>
+      <tbody>
+        <!-- 취합 데이터가 여기에 삽입됩니다 -->
+      </tbody>
+    </table>
+  </div>
+
+  <script src="dist/popup.bundle.js"></script>
+</body>
+
+</html>

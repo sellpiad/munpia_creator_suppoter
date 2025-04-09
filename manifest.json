@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "Data Fetcher Extension",
+  "version": "1.0",
+  "description": "지정된 URL 형식에서만 데이터를 파싱하여 합계를 구하는 확장 프로그램",
+  "permissions": [
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://librarym.munpia.com/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "엑셀 데이터 취합"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://librarym.munpia.com/manage/calculate*"
+      ],
+      "js": ["dist/content.bundle.js"],
+      "run_at": "document_end"
+    }
+  ]
+}
