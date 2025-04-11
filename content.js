@@ -1,267 +1,186 @@
 import { h, render } from 'preact';
-import { useState, useEffect } from 'preact/hooks';
 import htm from 'htm';
-import { Overlay } from './src/components/Overlay.js'; // Import Overlay component
-import { DBStatusOverlay } from './src/components/DBStatusOverlay.js'; // Import DBStatusOverlay component
+import { SyncOverlay } from './src/components/SyncOverlay.js'; // Import the new SyncOverlay component
 
 const html = htm.bind(h);
 
-const DB_NAME = 'excelDataDB';
-const DB_VERSION = 3;
-const STORE_NAME = 'settlements';
+// IndexedDB 관련 함수는 background.js로 이전되었으므로 여기서는 제거합니다.
 
-function openDB() {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
-    request.onupgradeneeded = (event) => {
-      console.log('IndexedDB upgrade needed (or initial setup). Version:', event.newVersion);
-      const db = event.target.result;
-      if (!db.objectStoreNames.contains(STORE_NAME)) {
-        const store = db.createObjectStore(STORE_NAME, { autoIncrement: true });
-        store.createIndex('salesMonth', '판매월', { unique: false });
-        store.createIndex('정산월', '정산월', { unique: false });
-        console.log('IndexedDB object store created.');
-      }
-    };
-    request.onsuccess = (event) => {
-      resolve(event.target.result);
-    };
-    request.onerror = (event) => {
-      console.error('IndexedDB error in content script:', event.target.errorCode);
-      reject(event.target.error);
-    };
-  });
+// --- 데이터 파싱 로직 (테이블 기반으로 변경) ---
+
+// 숫자 문자열에서 숫자만 추출하는 헬퍼 함수
+function parseNumericValue(text) {
+  if (!text) {
+    console.warn("parseNumericValue: Input text is empty or null.");
+    return 0;
+  }
+  const numericString = text.replace(/[^0-9]/g, '');
+  const parsedInt = parseInt(numericString, 10);
+  if (isNaN(parsedInt)) {
+      console.warn(`parseNumericValue: Failed to parse integer from "${text}". Resulted in NaN.`);
+      return 0;
+  }
+  console.log(`[Content Script] parseNumericValue: Parsed "${text}" to ${parsedInt}`); // 디버깅 로그 활성화
+  return parsedInt;
 }
 
-async function getMonthlySettlements(year) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const transaction = db.transaction([STORE_NAME], 'readonly');
-    const store = transaction.objectStore(STORE_NAME);
-    const index = store.index('salesMonth');
-    const monthlySums = {};
-    const lowerBound = `${year}-01`;
-    const upperBound = `${year}-12`;
-    const range = IDBKeyRange.bound(lowerBound, upperBound);
-    const request = index.openCursor(range);
-    request.onsuccess = (event) => {
-      const cursor = event.target.result;
-      if (cursor) {
-        const record = cursor.value;
-        const month = record['판매월'];
-        const settlementAmount = record['정산액'] || 0;
-        if (!monthlySums[month]) {
-          monthlySums[month] = 0;
-        }
-        monthlySums[month] += settlementAmount;
-        cursor.continue();
+// 테이블에서 작품명과 정산금액 추출
+function parseNovelDataFromTable(doc = document) {
+  const tableSelector = 'table.table-module_calculates-zfkCU';
+  const table = doc.querySelector(tableSelector);
+  if (!table) {
+    console.warn(`Target table not found: ${tableSelector}`);
+    return []; // 테이블 없으면 빈 배열 반환
+  }
+
+  const novelData = [];
+  const rows = table.querySelectorAll('tbody tr.item'); // tbody 안의 tr.item 만 선택
+
+  rows.forEach(row => {
+    const cells = row.querySelectorAll('td');
+    if (cells.length >= 7) { // 최소 7개의 셀이 있는지 확인
+      const titleElement = cells[1]?.querySelector('a'); // 두 번째 셀(작품명)의 a 태그
+      const amountText = cells[6]?.textContent; // 일곱 번째 셀(정산금액)의 텍스트
+
+      if (titleElement && amountText) {
+        const title = titleElement.textContent.trim();
+        const amount = parseNumericValue(amountText);
+        novelData.push({ '작품명': title, '정산금액': amount });
       } else {
-        console.log(`IndexedDB data fetched for year ${year}:`, monthlySums);
-        db.close();
-        resolve(monthlySums);
+        console.warn("Could not find title or amount in a row:", row);
       }
-    };
-    request.onerror = (event) => {
-      console.error('Error fetching data from IndexedDB:', event.target.error);
-      db.close();
-      reject(event.target.error);
-    };
-  });
-}
-
-function findAmountElement(doc = document) {
-  const spanSelector = 'span.calculatesinfo-module_sum-gIItm';
-  const spanElements = doc.querySelectorAll(spanSelector);
-  if (spanElements.length > 0) {
-    const lastSpanElement = spanElements[spanElements.length - 1];
-    const bElement = lastSpanElement.querySelector('b');
-    if (bElement) {
-      return bElement;
     } else {
-      console.error(`Inner <b> element not found within the span: ${spanSelector}`);
-      return null;
+      console.warn("Row does not have enough cells:", row);
     }
-  }
-  console.error(`Target span element not found: ${spanSelector}`);
-  return null;
+  });
+
+  console.log(`Parsed ${novelData.length} novel data items from table.`);
+  return novelData;
 }
 
-function parseAmount(bElement) {
-  if (!bElement || !bElement.textContent) {
-    console.error("Amount <b> element not found or has no text content.");
-    return null;
-  }
-  const numericString = bElement.textContent.replace(/[^0-9]/g, '');
-  return parseInt(numericString, 10);
-}
 
-function waitForData(doc, callback) {
-  const tryParse = () => {
-    const bElement = findAmountElement(doc);
-    if (bElement) {
-      callback(parseAmount(bElement));
-      return true;
+// 페이지 로딩 및 테이블 데이터 기다리는 함수 (MutationObserver 사용)
+function waitForTableData(doc, searchDateYYYYMM, callback) {
+  const settlementMonth = searchDateYYYYMM ? `${searchDateYYYYMM.substring(0, 4)}.${searchDateYYYYMM.substring(4, 6)}` : null;
+
+  const tryParseTable = () => {
+    const tableExists = doc.querySelector('table.table-module_calculates-zfkCU');
+    if (tableExists) {
+      const novelData = parseNovelDataFromTable(doc);
+      console.log(`[Content Script] Table found for ${settlementMonth}. Parsed ${novelData.length} items.`);
+      callback(novelData, settlementMonth);
+      return true; // 테이블 찾음 (데이터 유무와 관계없이)
     }
-    return false;
+    return false; // 테이블 아직 없음
   };
-  if (tryParse()) return;
+
+  // 즉시 파싱 시도
+  if (tryParseTable()) {
+    return; // 성공 시 종료
+  }
+
+  // 테이블이 초기에 없고, DOM 로드가 완료된 상태인지 확인
+  if (doc.readyState !== 'loading' && !doc.querySelector('table.table-module_calculates-zfkCU')) {
+      console.log(`[Content Script] Table not found initially for ${settlementMonth}. Sending empty data immediately.`);
+      callback([], settlementMonth); // 테이블 없으면 즉시 빈 데이터 전송
+      return;
+  }
+
+  // 테이블이 아직 로드되지 않았을 수 있으므로 MutationObserver 설정
   let observer = null;
-  const TIMEOUT_DURATION = 10000;
-  const timeoutId = setTimeout(() => {
-    console.warn("타임아웃: 지정 시간 내에 데이터를 찾지 못했습니다.");
+  const TIMEOUT_DURATION = 30000; // 30초 타임아웃
+  let timeoutId = null;
+
+  const cleanup = () => {
     if (observer) observer.disconnect();
-    callback(null);
+    if (timeoutId) clearTimeout(timeoutId);
+    observer = null;
+    timeoutId = null;
+    // console.log("waitForTableData cleanup done.");
+  };
+
+  timeoutId = setTimeout(() => {
+    console.warn(`Timeout waiting for table data for ${searchDateYYYYMM}.`);
+    cleanup();
+    const settlementMonth = searchDateYYYYMM ? `${searchDateYYYYMM.substring(0, 4)}.${searchDateYYYYMM.substring(4, 6)}` : null;
+    // 타임아웃 시 빈 배열과 정산월 전달 (오류 대신)
+    callback([], settlementMonth);
   }, TIMEOUT_DURATION);
+
+  observer = new MutationObserver((mutations, obs) => {
+    // console.log("MutationObserver triggered, trying to parse table..."); // 로그 줄이기
+    if (tryParseTable()) { // tryParseTable 내부에서 callback 호출 및 true 반환
+      cleanup();
+    }
+  });
+
+  // 옵저버 시작 (DOM 로드 상태 고려)
   const startObserver = () => {
-    if (observer) observer.disconnect();
-    observer = new MutationObserver((mutations, obs) => {
-      console.log("MutationObserver triggered, trying to parse amount...");
-      if (tryParse()) {
-        obs.disconnect();
-        observer = null;
-        clearTimeout(timeoutId);
-      }
-    });
     if (doc.body) {
       observer.observe(doc.body, { childList: true, subtree: true });
-      console.log("MutationObserver started on document.body");
+      // console.log("MutationObserver started for table data.");
     } else {
-      console.warn("document.body not available yet for MutationObserver");
-      doc.addEventListener('DOMContentLoaded', () => {
-        if (doc.body) {
-          observer.observe(doc.body, { childList: true, subtree: true });
-          console.log("MutationObserver started after DOMContentLoaded");
-        } else {
-          console.error("document.body still not available after DOMContentLoaded");
-        }
-      }, { once: true });
+      console.error("document.body not available to start observer.");
+      cleanup();
+      const settlementMonth = searchDateYYYYMM ? `${searchDateYYYYMM.substring(0, 4)}.${searchDateYYYYMM.substring(4, 6)}` : null;
+      callback([], settlementMonth); // body 없으면 실패 처리 (빈 배열 전달)
     }
   };
-  setTimeout(startObserver, 500);
+
+  if (doc.readyState === 'loading') {
+    doc.addEventListener('DOMContentLoaded', startObserver, { once: true });
+  } else {
+    startObserver();
+  }
 }
 
 const urlParams = new URL(window.location).searchParams;
-const isSlave = urlParams.has("slave");
+const isFetchTab = urlParams.has("fetch"); // 'slave' 대신 'fetch' 파라미터 확인
 
-if (isSlave) {
-  waitForData(document, function(amount) {
-    const month = urlParams.get("searchDate");
-    chrome.runtime.sendMessage({ type: 'monthlyData', month: month, amount: amount });
-    chrome.runtime.sendMessage({ type: 'closeTab' });
-  });
-} else {
-  // 메인 페이지(마스터 탭) 로직
-  function App() {
-    const [monthlyResults, setMonthlyResults] = useState({});
-    const [externalMonthlySums, setExternalMonthlySums] = useState({});
-    const [externalDataLoading, setExternalDataLoading] = useState(true);
-    const [monthList, setMonthList] = useState([]);
-    const [initialDataLoaded, setInitialDataLoaded] = useState(false);
-    const [currentYear, setCurrentYear] = useState(null);
-    useEffect(() => {
-      chrome.runtime.sendMessage({ type: 'registerMaster' }, (response) => {
-        if (chrome.runtime.lastError) {
-          console.error("Error registering master:", chrome.runtime.lastError.message);
-        } else {
-          console.log("Master registered", response);
+if (isFetchTab) {
+  // 데이터 수집용 탭 로직
+  const searchDate = urlParams.get("searchDate"); // YYYYMM 형식
+  if (searchDate && searchDate.length === 6) {
+    console.log(`Fetch tab for ${searchDate} activated.`);
+    waitForTableData(document, searchDate, function(novelData, settlementMonth) {
+      console.log(`Parsed ${novelData.length} items for ${settlementMonth}.`);
+      // 백그라운드로 파싱 결과 전송 (데이터 배열 포함)
+      chrome.runtime.sendMessage({
+        type: 'parsedMonthlyData',
+        data: {
+          settlementMonth: settlementMonth, // YYYY.MM 형식
+          novelData: novelData // 작품 데이터 배열
         }
+      }, response => {
+         if (chrome.runtime.lastError) {
+            console.error("Error sending parsed table data:", chrome.runtime.lastError.message);
+         }
+         // 메시지 전송 후 할 일 없음, 백그라운드가 탭 닫음
       });
-      const getValidSearchDate = (callback) => {
-        const check = () => {
-          const urlParams = new URL(window.location).searchParams;
-          const searchDate = urlParams.get("searchDate");
-          if (searchDate && searchDate.length === 6) {
-            callback(searchDate);
-          } else {
-            console.log("Waiting for valid searchDate...");
-            setTimeout(check, 500);
-          }
-        };
-        check();
-      };
-      getValidSearchDate((currentSearchDate) => {
-        const year = currentSearchDate.slice(0, 4);
-        setCurrentYear(year);
-        const currentMonthNum = parseInt(currentSearchDate.slice(4, 6), 10);
-        const calculatedMonthList = [];
-        for (let m = 1; m <= currentMonthNum; m++) {
-          let mm = m.toString().padStart(2, '0');
-          calculatedMonthList.push(`${year}-${mm}`);
-        }
-        setMonthList(calculatedMonthList);
-        const initialResults = {};
-        calculatedMonthList.forEach(month => initialResults[month] = null);
-        setMonthlyResults(initialResults);
-        waitForData(document, (amount) => {
-          const currentMonthFormatted = `${year}-${currentSearchDate.slice(4, 6)}`;
-          console.log(`Munpia data for ${currentMonthFormatted} found: ${amount}`);
-          setMonthlyResults(prevResults => ({
-            ...prevResults,
-            [currentMonthFormatted]: amount !== null ? amount : undefined
-          }));
-          setInitialDataLoaded(true);
-        });
-        setExternalDataLoading(true);
-        console.log(`[Content Script] Attempting to fetch external DB data for year: ${year} after a short delay.`);
-        setTimeout(() => {
-          chrome.runtime.sendMessage({ type: 'getExternalMonthlySum', year: year }, (response) => {
-            if (chrome.runtime.lastError || response.status === 'error') {
-              console.error("[Content Script] Error fetching external DB data:", chrome.runtime.lastError || response.message);
-              setExternalMonthlySums({});
-            } else {
-              console.log('[Content Script] Successfully fetched external DB data:', response.sums);
-              setExternalMonthlySums(response.sums);
-            }
-            setExternalDataLoading(false);
-          });
-        }, 500);
-      });
-      const messageListener = (message, sender, sendResponse) => {
-        if (message.type === 'monthlyData') {
-          const year = message.month.slice(0, 4);
-          const month = message.month.slice(4, 6);
-          const formattedMonth = `${year}-${month}`;
-          console.log(`Received Munpia data for ${formattedMonth}: ${message.amount}`);
-          setMonthlyResults(prevResults => ({
-            ...prevResults,
-            [formattedMonth]: message.amount !== null ? message.amount : undefined
-          }));
-        }
-      };
-      chrome.runtime.onMessage.addListener(messageListener);
-      return () => {
-        console.log("Cleaning up App component listener.");
-        chrome.runtime.onMessage.removeListener(messageListener);
-      };
-    }, []);
-    useEffect(() => {
-      if (initialDataLoaded && monthList.length > 0 && currentYear) {
-        const currentSearchDate = new URL(window.location).searchParams.get("searchDate");
-        const currentMonthFormatted = `${currentYear}-${currentSearchDate.slice(4, 6)}`;
-        console.log("Initial data loaded, opening slave tabs...");
-        monthList.forEach((month) => {
-          if (month !== currentMonthFormatted) {
-            const monthForUrl = month.replace('-', '');
-            console.log(`Requesting tab for month: ${monthForUrl}`);
-            chrome.runtime.sendMessage({
-              type: 'openTab',
-              url: `https://librarym.munpia.com/manage/calculate?tab=monthly&blogUrl=&searchDate=${monthForUrl}&slave=true`
-            });
-          }
-        });
-      }
-    }, [initialDataLoaded, monthList, currentYear]);
-    return html`<${Overlay} monthlyResults=${monthlyResults} monthList=${monthList} externalMonthlySums=${externalMonthlySums} externalDataLoading=${externalDataLoading} />`;
+    });
+  } else {
+    console.error("Fetch tab opened without valid searchDate parameter.");
+    // 유효하지 않은 탭이면 바로 닫도록 메시지 전송 시도
+    chrome.runtime.sendMessage({ type: 'closeTab' }).catch(e => console.warn("Failed to send closeTab message:", e));
   }
 
-  const overlayContainer = document.createElement('div');
-  overlayContainer.id = 'dataFetcherOverlayContainer';
-  document.body.appendChild(overlayContainer);
-  render(html`<${App} />`, overlayContainer);
-}
+} else if (window.location.pathname.startsWith('/manage/calculate')) {
+  // 메인 정산 페이지 로직 (오버레이 렌더링)
+  console.log("Main calculate page detected. Rendering SyncOverlay.");
 
-// DB 상태 오버레이 렌더링
-const dbStatusContainer = document.createElement('div');
-dbStatusContainer.id = 'dbStatusOverlayContainer';
-document.body.appendChild(dbStatusContainer);
-render(html`<${DBStatusOverlay} />`, dbStatusContainer);
+  // 기존 오버레이 컨테이너 제거 (있을 경우)
+  const existingOverlay = document.getElementById('dataFetcherOverlayContainer');
+  if (existingOverlay) existingOverlay.remove();
+  const existingDbStatusOverlay = document.getElementById('dbStatusOverlayContainer');
+  if (existingDbStatusOverlay) existingDbStatusOverlay.remove();
+
+  // 새 오버레이 컨테이너 생성 및 렌더링
+  const syncOverlayContainer = document.createElement('div');
+  syncOverlayContainer.id = 'munpiaSyncOverlayContainer'; // 새 ID 사용
+  document.body.appendChild(syncOverlayContainer);
+  render(html`<${SyncOverlay} />`, syncOverlayContainer);
+
+} else {
+  // 그 외 Munpia 페이지 (아무 작업 안 함)
+  // console.log("Not a target page for the extension.");
+}
