@@ -27,66 +27,55 @@ function parseNumericValue(text) {
 // 테이블에서 작품명과 정산금액 추출
 function parseNovelDataFromTable(doc = document) {
   const tableSelector = 'table.table-module_calculates-zfkCU';
+  console.log(`[Content Script] Attempting to find table with selector: ${tableSelector}`);
   const table = doc.querySelector(tableSelector);
   if (!table) {
-    console.warn(`Target table not found: ${tableSelector}`);
+    console.warn(`[Content Script] Target table not found: ${tableSelector}`);
     return []; // 테이블 없으면 빈 배열 반환
   }
+  console.log("[Content Script] Table found.");
 
   const novelData = [];
   const rows = table.querySelectorAll('tbody tr.item'); // tbody 안의 tr.item 만 선택
+  console.log(`[Content Script] Found ${rows.length} rows in table body.`);
 
-  rows.forEach(row => {
+  rows.forEach((row, index) => {
+    console.log(`[Content Script] Processing row ${index + 1}`);
     const cells = row.querySelectorAll('td');
+    console.log(`[Content Script] Row ${index + 1} has ${cells.length} cells.`);
+
     if (cells.length >= 7) { // 최소 7개의 셀이 있는지 확인
       const titleElement = cells[1]?.querySelector('a'); // 두 번째 셀(작품명)의 a 태그
       const amountText = cells[6]?.textContent; // 일곱 번째 셀(정산금액)의 텍스트
 
+      const titleText = titleElement ? titleElement.textContent.trim() : 'N/A';
+      const rawAmountText = amountText || 'N/A';
+      console.log(`[Content Script] Row ${index + 1}: Raw Title='${titleText}', Raw Amount='${rawAmountText}'`);
+
       if (titleElement && amountText) {
-        const title = titleElement.textContent.trim();
-        const amount = parseNumericValue(amountText);
+        const title = titleText;
+        const amount = parseNumericValue(amountText); // parseNumericValue 내부 로그도 확인 필요
+        console.log(`[Content Script] Row ${index + 1}: Parsed Title='${title}', Parsed Amount=${amount}`);
         novelData.push({ '작품명': title, '정산금액': amount });
       } else {
-        console.warn("Could not find title or amount in a row:", row);
+        console.warn(`[Content Script] Could not find title element or amount text in row ${index + 1}:`, row);
       }
     } else {
-      console.warn("Row does not have enough cells:", row);
+      console.warn(`[Content Script] Row ${index + 1} does not have enough cells (needs >= 7):`, row);
     }
   });
 
-  console.log(`Parsed ${novelData.length} novel data items from table.`);
+  console.log(`[Content Script] Finished parsing. Parsed ${novelData.length} novel data items from table.`);
   return novelData;
 }
 
 
-// 페이지 로딩 및 테이블 데이터 기다리는 함수 (MutationObserver 사용)
+// 페이지 로딩 및 테이블 또는 "작품 없음" 표시 기다리는 함수 (MutationObserver 사용)
 function waitForTableData(doc, searchDateYYYYMM, callback) {
   const settlementMonth = searchDateYYYYMM ? `${searchDateYYYYMM.substring(0, 4)}.${searchDateYYYYMM.substring(4, 6)}` : null;
+  const tableSelector = 'table.table-module_calculates-zfkCU';
+  const noDataSelector = 'div.EmptyPage-module_empty-wrap-WzZki'; // "작품 없음" 표시 선택자
 
-  const tryParseTable = () => {
-    const tableExists = doc.querySelector('table.table-module_calculates-zfkCU');
-    if (tableExists) {
-      const novelData = parseNovelDataFromTable(doc);
-      console.log(`[Content Script] Table found for ${settlementMonth}. Parsed ${novelData.length} items.`);
-      callback(novelData, settlementMonth);
-      return true; // 테이블 찾음 (데이터 유무와 관계없이)
-    }
-    return false; // 테이블 아직 없음
-  };
-
-  // 즉시 파싱 시도
-  if (tryParseTable()) {
-    return; // 성공 시 종료
-  }
-
-  // 테이블이 초기에 없고, DOM 로드가 완료된 상태인지 확인
-  if (doc.readyState !== 'loading' && !doc.querySelector('table.table-module_calculates-zfkCU')) {
-      console.log(`[Content Script] Table not found initially for ${settlementMonth}. Sending empty data immediately.`);
-      callback([], settlementMonth); // 테이블 없으면 즉시 빈 데이터 전송
-      return;
-  }
-
-  // 테이블이 아직 로드되지 않았을 수 있으므로 MutationObserver 설정
   let observer = null;
   const TIMEOUT_DURATION = 30000; // 30초 타임아웃
   let timeoutId = null;
@@ -96,34 +85,70 @@ function waitForTableData(doc, searchDateYYYYMM, callback) {
     if (timeoutId) clearTimeout(timeoutId);
     observer = null;
     timeoutId = null;
-    // console.log("waitForTableData cleanup done.");
+    console.log("[Content Script] Cleanup done.");
   };
 
-  timeoutId = setTimeout(() => {
-    console.warn(`Timeout waiting for table data for ${searchDateYYYYMM}.`);
-    cleanup();
-    const settlementMonth = searchDateYYYYMM ? `${searchDateYYYYMM.substring(0, 4)}.${searchDateYYYYMM.substring(4, 6)}` : null;
-    // 타임아웃 시 빈 배열과 정산월 전달 (오류 대신)
-    callback([], settlementMonth);
-  }, TIMEOUT_DURATION);
+  // 테이블 또는 "작품 없음" 표시를 확인하고 콜백 호출하는 함수
+  const checkContentAndCallback = () => {
+    const tableElement = doc.querySelector(tableSelector);
+    const noDataElement = doc.querySelector(noDataSelector);
 
-  observer = new MutationObserver((mutations, obs) => {
-    // console.log("MutationObserver triggered, trying to parse table..."); // 로그 줄이기
-    if (tryParseTable()) { // tryParseTable 내부에서 callback 호출 및 true 반환
+    if (tableElement) {
+      console.log(`[Content Script] Table found for ${settlementMonth}. Parsing data...`);
+      const novelData = parseNovelDataFromTable(doc); // parseNovelDataFromTable은 테이블 존재 가정
+      callback(novelData, settlementMonth);
       cleanup();
+      return true; // 처리 완료
+    } else if (noDataElement) {
+      console.log(`[Content Script] "No data" indicator found for ${settlementMonth}. Sending empty array.`);
+      callback([], settlementMonth); // 작품 없음 표시 발견 시 빈 배열 전송
+      cleanup();
+      return true; // 처리 완료
+    }
+    // console.log("[Content Script] Neither table nor 'no data' indicator found yet.");
+    return false; // 아직 대상 없음
+  };
+
+  // 즉시 확인 시도
+  if (checkContentAndCallback()) {
+    return; // 성공 시 종료
+  }
+
+  // --- 즉시 빈 데이터 보내는 로직 제거 ---
+  // if (doc.readyState !== 'loading' && !doc.querySelector(tableSelector) && !doc.querySelector(noDataSelector)) {
+  //     console.log(`[Content Script] Neither table nor 'no data' found initially for ${settlementMonth}. Starting observer.`);
+  //     // 예전에는 여기서 빈 데이터를 보냈으나, 이제는 Observer를 시작함
+  // }
+
+  // MutationObserver 설정
+  console.log("[Content Script] Setting up MutationObserver.");
+  observer = new MutationObserver((mutations, obs) => {
+    // console.log("[Content Script] MutationObserver triggered. Checking content...");
+    if (checkContentAndCallback()) {
+      // 콜백 호출 및 cleanup은 checkContentAndCallback 내부에서 처리됨
     }
   });
+
+  // 타임아웃 설정
+  timeoutId = setTimeout(() => {
+    console.warn(`[Content Script] Timeout waiting for table or 'no data' indicator for ${searchDateYYYYMM}. Sending empty array.`);
+    callback([], settlementMonth); // 타임아웃 시 빈 배열 전송
+    cleanup();
+  }, TIMEOUT_DURATION);
 
   // 옵저버 시작 (DOM 로드 상태 고려)
   const startObserver = () => {
     if (doc.body) {
       observer.observe(doc.body, { childList: true, subtree: true });
-      // console.log("MutationObserver started for table data.");
+      console.log("[Content Script] MutationObserver started.");
+      // 옵저버 시작 후 즉시 다시 확인 (옵저버 설정 전에 이미 요소가 로드되었을 수 있음)
+      if (checkContentAndCallback()) {
+         return;
+      }
     } else {
-      console.error("document.body not available to start observer.");
+      console.error("[Content Script] document.body not available to start observer. Sending empty array.");
+      callback([], settlementMonth); // body 없으면 실패 처리
       cleanup();
-      const settlementMonth = searchDateYYYYMM ? `${searchDateYYYYMM.substring(0, 4)}.${searchDateYYYYMM.substring(4, 6)}` : null;
-      callback([], settlementMonth); // body 없으면 실패 처리 (빈 배열 전달)
     }
   };
 
