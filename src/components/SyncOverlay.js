@@ -28,22 +28,34 @@ export function SyncOverlay() {
 
   const formatNumber = (num) => num != null ? num.toLocaleString('ko-KR') : '0';
 
-  // 데이터 로드 함수
+  // 데이터 로드 함수 (Sync 데이터용)
   const loadData = useCallback(() => {
-    chrome.runtime.sendMessage({ type: 'getTotalSum' }, response => {
-      if (chrome.runtime.lastError) console.error("Error getTotalSum:", chrome.runtime.lastError.message);
-      else if (response?.status === 'success') setTotalSum(response.totalSum);
-      else if (response?.status === 'error') console.error("Error getTotalSum:", response.message);
-    });
-    chrome.runtime.sendMessage({ type: 'getSumByTitle' }, response => {
-       if (chrome.runtime.lastError) console.error("Error getSumByTitle:", chrome.runtime.lastError.message);
-       else if (response?.status === 'success') setSumByTitle(response.sums || {});
-       else if (response?.status === 'error') console.error("Error getSumByTitle:", response.message);
-     });
-    chrome.runtime.sendMessage({ type: 'getRecordCount' }, response => {
-      if (chrome.runtime.lastError) console.error("Error getRecordCount:", chrome.runtime.lastError.message);
-      else if (response?.status === 'success') setRecordCount(response.count);
-      else if (response?.status === 'error') console.error("Error getRecordCount:", response.message);
+    // 이제 getSyncDbStatus 메시지 하나로 모든 정보 요청
+    chrome.runtime.sendMessage({ type: 'getSyncDbStatus' }, response => {
+      // 컨텍스트 무효화 오류 방지
+      if (chrome.runtime.lastError) {
+        console.warn("SyncOverlay: Context invalidated while getting DB status.", chrome.runtime.lastError.message);
+        return; // 오류 발생 시 콜백 종료
+      }
+      // 기존 응답 처리 로직
+      if (response?.status === 'success') {
+        setTotalSum(response.totalSum);
+        setSumByTitle(response.sums || {}); // sums 필드 확인
+        setRecordCount(response.recordCount);
+        setErrorMessage(''); // 성공 시 오류 메시지 초기화
+      } else if (response?.status === 'error') {
+        console.error("Error getSyncDbStatus:", response.message);
+        setErrorMessage(`동기화 DB 상태 로드 오류: ${response.message}`);
+        setTotalSum(null);
+        setSumByTitle({});
+        setRecordCount(null);
+      } else {
+         console.error("Unknown response for getSyncDbStatus:", response);
+         setErrorMessage('동기화 DB 상태 로드 중 알 수 없는 응답');
+         setTotalSum(null);
+         setSumByTitle({});
+         setRecordCount(null);
+      }
     });
   }, []);
 
@@ -52,42 +64,58 @@ export function SyncOverlay() {
     if (syncState === 'syncing') {
       setStatusText('취소 요청 중...');
       chrome.runtime.sendMessage({ type: 'cancelSync' }, response => {
+        // 컨텍스트 무효화 오류 방지
         if (chrome.runtime.lastError) {
-          setErrorMessage('취소 요청 실패: ' + chrome.runtime.lastError.message);
+          console.warn("SyncOverlay: Context invalidated during cancel sync.", chrome.runtime.lastError.message);
+          // 오류 발생 시 UI를 idle 상태로 되돌릴 수 있음 (선택적)
+          setSyncState('idle');
           setStatusText('');
-        } else if (response?.status === 'cancelled') {
+          setErrorMessage('취소 요청 중 오류 발생 (컨텍스트 무효화)');
+          return;
+        }
+        // 기존 응답 처리
+        if (response?.status === 'cancelled') {
           // 상태 업데이트는 messageListener에서 처리
         } else if (response?.status === 'not_syncing') {
            setSyncState('idle');
            setStatusText('');
+        } else {
+           // 예상치 못한 응답 처리 (예: 오류 메시지 표시)
+           console.error("Unexpected response during cancel sync:", response);
+           setErrorMessage('취소 요청 중 예상치 못한 응답');
         }
       });
     } else {
       setSyncState('syncing');
-      setStatusText('동기화 시작 중...'); // "시작 중..." 텍스트 설정
+      setStatusText('동기화 시작 중...');
       setFailedMonths([]);
       setErrorMessage('');
       chrome.runtime.sendMessage({
         type: 'startFullSync',
         startDate: { year: startYear, month: startMonth }
       }, response => {
-        if (chrome.runtime.lastError) {
-          setSyncState('error');
-          setErrorMessage('동기화 시작 오류: ' + chrome.runtime.lastError.message);
-          setStatusText('');
-        } else if (response?.status === 'error') {
-          setSyncState('error');
-          setErrorMessage('동기화 시작 오류: ' + response.message);
-          setStatusText('');
-        } else if (response?.status !== 'started') {
+         // 컨텍스트 무효화 오류 방지
+         if (chrome.runtime.lastError) {
+           console.warn("SyncOverlay: Context invalidated during start sync.", chrome.runtime.lastError.message);
            setSyncState('error');
-           setErrorMessage('동기화 시작 중 예상치 못한 응답');
+           setErrorMessage('동기화 시작 중 오류 발생 (컨텍스트 무효화)');
            setStatusText('');
-        }
-        // 성공적으로 시작되면 progressUpdate 메시지가 상태를 업데이트함
+           return;
+         }
+         // 기존 응답 처리
+         if (response?.status === 'error') {
+           setSyncState('error');
+           setErrorMessage('동기화 시작 오류: ' + response.message);
+           setStatusText('');
+         } else if (response?.status !== 'started') {
+            setSyncState('error');
+            setErrorMessage('동기화 시작 중 예상치 못한 응답');
+            setStatusText('');
+         }
+         // 성공적으로 시작되면 progressUpdate 메시지가 상태를 업데이트함
       });
     }
-  }, [syncState, startYear, startMonth]); // loadData 제거
+  }, [syncState, startYear, startMonth]);
 
   // 컴포넌트 마운트 및 메시지 리스너 설정
   useEffect(() => {
@@ -158,11 +186,14 @@ export function SyncOverlay() {
 
   // 스타일 정의
   const overlayStyle = {
-    position: 'fixed', bottom: '20px', left: '20px', padding: '15px',
+    // position: 'fixed', bottom: '20px', left: '20px', // 제거됨 (부모 컨테이너에서 관리)
+    // zIndex: '9999', // 제거됨 (부모 컨테이너에서 관리)
+    padding: '15px',
     backgroundColor: 'rgba(20, 20, 20, 0.9)', color: '#e0e0e0',
     fontFamily: '"Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif', fontSize: '13px',
-    zIndex: '9999', borderRadius: '8px', boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
-    minWidth: '320px', maxWidth: '450px', lineHeight: '1.6'
+    borderRadius: '8px', boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+    minWidth: '320px', maxWidth: '450px', lineHeight: '1.6',
+    marginBottom: '10px' // 아래 오버레이와의 간격 추가
   };
   const inputGroupStyle = { display: 'flex', alignItems: 'center', marginBottom: '8px' };
   const labelStyle = { marginRight: '8px', color: '#bdbdbd' };

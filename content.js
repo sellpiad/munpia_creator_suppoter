@@ -1,6 +1,7 @@
-import { h, render } from 'preact';
+import { h, render, Fragment } from 'preact'; // Fragment 추가
 import htm from 'htm';
-import { SyncOverlay } from './src/components/SyncOverlay.js'; // Import the new SyncOverlay component
+import { SyncOverlay } from './src/components/SyncOverlay.js';
+import { UploadOverlay } from './src/components/UploadOverlay.js'; // 새로 만든 UploadOverlay 임포트
 
 const html = htm.bind(h);
 
@@ -199,11 +200,30 @@ if (isFetchTab) {
   const existingDbStatusOverlay = document.getElementById('dbStatusOverlayContainer');
   if (existingDbStatusOverlay) existingDbStatusOverlay.remove();
 
-  // 새 오버레이 컨테이너 생성 및 렌더링
-  const syncOverlayContainer = document.createElement('div');
-  syncOverlayContainer.id = 'munpiaSyncOverlayContainer'; // 새 ID 사용
-  document.body.appendChild(syncOverlayContainer);
-  render(html`<${SyncOverlay} />`, syncOverlayContainer);
+  // 오버레이들을 담을 최상위 컨테이너 생성 (기존 로직 활용 또는 수정)
+  let overlayRootContainer = document.getElementById('munpiaExtensionOverlays');
+  if (!overlayRootContainer) {
+    overlayRootContainer = document.createElement('div');
+    overlayRootContainer.id = 'munpiaExtensionOverlays';
+    // Flexbox 스타일 적용하여 왼쪽 하단에 세로로 쌓이도록 설정
+    overlayRootContainer.style.position = 'fixed';
+    overlayRootContainer.style.bottom = '20px';
+    overlayRootContainer.style.left = '20px';
+    overlayRootContainer.style.zIndex = '10000'; // 다른 요소 위에 표시되도록 z-index 설정
+    overlayRootContainer.style.display = 'flex';
+    overlayRootContainer.style.flexDirection = 'column-reverse'; // 아래쪽 오버레이부터 표시
+    overlayRootContainer.style.alignItems = 'flex-start'; // 왼쪽 정렬
+    document.body.appendChild(overlayRootContainer);
+  }
+
+  // SyncOverlay와 UploadOverlay를 함께 렌더링
+  render(html`
+    <${Fragment}>
+      <${SyncOverlay} />
+      <${UploadOverlay} />
+    </${Fragment}>
+  `, overlayRootContainer);
+
 
 } else {
   // 그 외 Munpia 페이지 (아무 작업 안 함)

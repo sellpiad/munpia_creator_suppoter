@@ -9,10 +9,6 @@
   "host_permissions": [
     "https://librarym.munpia.com/*"
   ],
-  "action": {
-    "default_popup": "popup.html",
-    "default_title": "엑셀 데이터 취합"
-  },
   "background": {
     "service_worker": "background.js"
   },
